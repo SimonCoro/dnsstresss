@@ -2,10 +2,13 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -23,6 +26,7 @@ var (
 	resolver        string
 	randomIds       bool
 	flood           bool
+	dohEndpoint     string
 )
 
 func init() {
@@ -40,6 +44,8 @@ func init() {
 		"Resolver to test against")
 	flag.BoolVar(&flood, "f", false,
 		"Don't wait for an answer before sending another")
+	flag.StringVar(&dohEndpoint, "doh", "",
+		"DOH endpoint to use for DNS over HTTPS requests")
 }
 
 func main() {
@@ -63,14 +69,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	parsedResolver, err := ParseIPPort(resolver)
-	resolver = parsedResolver
-	if err != nil {
-		fmt.Println(aurora.Sprintf(aurora.Red("%s (%s)"), "Unable to parse the resolver address", err))
-		os.Exit(2)
-	}
-
-	// all remaining parameters are treated as domains to be used in round-robin in the threads
+	// Process target domains
 	targetDomains := make([]string, flag.NArg())
 	for index, element := range flag.Args() {
 		if element[len(element)-1] == '.' {
@@ -80,9 +79,22 @@ func main() {
 		}
 	}
 
-	fmt.Printf("Testing resolver: %s.\n", aurora.Bold(resolver))
+	// Display resolver or DOH endpoint information
+	if dohEndpoint != "" {
+		fmt.Printf("Testing DOH endpoint: %s.\n", aurora.Bold(dohEndpoint))
+	} else {
+		parsedResolver, err := ParseIPPort(resolver)
+		resolver = parsedResolver
+		if err != nil {
+			fmt.Println(aurora.Sprintf(aurora.Red("%s (%s)"), "Unable to parse the resolver address", err))
+			os.Exit(2)
+		}
+		fmt.Printf("Testing resolver: %s.\n", aurora.Bold(resolver))
+	}
+
 	fmt.Printf("Target domains: %v.\n\n", targetDomains)
 
+	// Check if domains can be resolved initially
 	hasErrors := false
 	for i := range targetDomains {
 		hasErrors = hasErrors || testRequest(targetDomains[i])
@@ -184,7 +196,19 @@ func linearResolver(threadID int, domain string, sentCounterCh chan<- statsMessa
 }
 
 func dnsExchange(resolver string, message *dns.Msg) error {
-	//XXX: How can we share the connection between subsequent attempts ?
+	// Check if DOH is enabled
+	if dohEndpoint != "" {
+		response, err := performDOHRequest(message)
+		if err != nil {
+			return fmt.Errorf("DOH request failed: %v", err)
+		}
+		if len(response) == 0 {
+			return fmt.Errorf("empty DOH response")
+		}
+		return nil
+	}
+
+	// Standard DNS request (UDP)
 	dnsconn, err := net.Dial("udp", resolver)
 	if err != nil {
 		return err
@@ -197,4 +221,28 @@ func dnsExchange(resolver string, message *dns.Msg) error {
 
 	_, err = co.ReadMsg()
 	return err
+}
+
+// performDOHRequest sends a DNS query over HTTPS
+func performDOHRequest(query *dns.Msg) ([]byte, error) {
+	rawQuery, err := query.Pack()
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack DNS query: %v", err)
+	}
+
+	encodedQuery := base64.RawURLEncoding.EncodeToString(rawQuery)
+	req, err := http.NewRequest("GET", dohEndpoint+"?dns="+encodedQuery, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create DOH request: %v", err)
+	}
+	req.Header.Set("Accept", "application/dns-message")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("DOH request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	return ioutil.ReadAll(resp.Body)
 }

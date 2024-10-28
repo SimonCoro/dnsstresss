@@ -21,6 +21,7 @@ Then:
     -concurrency int
                 Internal buffer (default 50)
     -d int      Update interval of the stats (in ms) (default 1000)
+	-doh string DOH endpoint to use for DNS over HTTPS requests
     -f          Don't wait for an answer before sending another
     -i          Do an iterative query instead of recursive (to stress authoritative nameservers)
     -r string   Resolver to test against (default "127.0.0.1:53")
